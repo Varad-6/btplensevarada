@@ -1,0 +1,37 @@
+{
+  "name": "BTPMonitorTool",
+  "version": "1.0.0",
+  "description": "A simple CAP project.",
+  "dependencies": {
+    "@sap/cds": "^9",
+    "@sap/xssec": "^4.11.2",
+    "axios": "^1.13.2",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@cap-js/hana": "^2",
+    "@cap-js/sqlite": "^2",
+    "@sap/cds-dk": "^9",
+    "mbt": "^1.2.29",
+    "rimraf": "^5.0.5"
+  },
+  "scripts": {
+    "start": "cds-serve",
+    "watch-btplense": "cds watch --open btplense/index.html?sap-ui-xx-viewCache=false --livereload false",
+    "undeploy": "cf undeploy BTPLense --delete-services --delete-service-keys --delete-service-brokers",
+    "build": "rimraf resources mta_archives gen app/btplense/btplense.zip app/btplense/dist app/btplensev2/btplensev2.zip app/btplensev2/dist && mbt build --mtar archive",
+    "deploy": "cf deploy mta_archives/archive.mtar --retries 1"
+  },
+  "private": true,
+  "cds": {
+    "requires": {
+      "auth": "mocked",
+      "[production]": {
+        "auth": "xsuaa"
+      }
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

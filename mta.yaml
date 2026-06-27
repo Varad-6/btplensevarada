@@ -1,0 +1,114 @@
+_schema-version: '3.1'
+ID: BTPLense
+version: 1.0.0
+description: BTP Monitoring & Lense Tool
+
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npx cds build --production
+        - cp srv/accounts.json gen/srv/accounts.json
+
+modules:
+
+  # ── Backend CAP service ──────────────────────────────────────────────────────
+  - name: BTPLense-srv
+    type: nodejs
+    path: gen/srv
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 256M
+      disk-quota: 512M
+    build-parameters:
+      builder: npm-ci
+    requires:
+      - name: BTPLense-auth
+      - name: BTPLense-destination-service
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+
+  # ── HTML5 content deployer (reuse existing repo host linked to Work Zone) ────
+  - name: BTPLense-app-content
+    type: com.sap.application.content
+    path: .
+    requires:
+      - name: BTPMonitorTool-html5-service
+        parameters:
+          content-target: true
+    build-parameters:
+      build-result: resources
+      requires:
+        - artifacts:
+            - btplense.zip
+          name: BTPLense-btplense
+          target-path: resources/
+        - artifacts:
+            - btplensev2.zip
+          name: BTPLense-btplensev2
+          target-path: resources/
+
+  # ── SAPUI5 frontend — original btplense ──────────────────────────────────────
+  - name: BTPLense-btplense
+    type: html5
+    path: app/btplense
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - mkdir -p dist
+        - zip -r dist/btplense.zip . --exclude "dist/*" --exclude "*.zip" --exclude "*.map"
+      supported-platforms: []
+
+  # ── SAPUI5 frontend — btplensev2 (new deployment) ────────────────────────────
+  - name: BTPLense-btplensev2
+    type: html5
+    path: app/btplensev2
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - mkdir -p dist
+        - zip -r dist/btplensev2.zip . --exclude "dist/*" --exclude "*.zip" --exclude "*.map"
+      supported-platforms: []
+
+resources:
+
+  # ── XSUAA ───────────────────────────────────────────────────────────────────
+  - name: BTPLense-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      config:
+        xsappname: BTPLense-dev
+        tenant-mode: dedicated
+
+  # ── Reuse existing HTML5 App Repo (already linked to Work Zone) ─────────────
+  - name: BTPMonitorTool-html5-service
+    type: org.cloudfoundry.existing-service
+
+  # ── Destination service ──────────────────────────────────────────────────────
+  - name: BTPLense-destination-service
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: destination
+      service-plan: lite
+      config:
+        HTML5Runtime_enabled: true
+        init_data:
+          instance:
+            destinations:
+              - Name: BTPLense-api
+                Description: BTPLense Backend API
+                URL: ~{srv-api/srv-url}
+                Type: HTTP
+                ProxyType: Internet
+                Authentication: NoAuthentication
+                forwardAuthToken: true
+            existing_destinations_policy: update
+    requires:
+      - name: srv-api

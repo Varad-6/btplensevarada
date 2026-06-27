@@ -1,0 +1,7 @@
+{
+  "xsappname": "BTPLense-dev",
+  "tenant-mode": "dedicated",
+  "description": "BTP Lense Security",
+  "scopes": [],
+  "role-templates": []
+}
