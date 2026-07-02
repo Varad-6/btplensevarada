@@ -17,9 +17,9 @@
   },
   "scripts": {
     "start": "cds-serve",
-    "watch-btplense": "cds watch --open btplense/index.html?sap-ui-xx-viewCache=false --livereload false",
+    "watch-btplense": "cds watch --open btplensev2/index.html?sap-ui-xx-viewCache=false --livereload false",
     "undeploy": "cf undeploy BTPLense --delete-services --delete-service-keys --delete-service-brokers",
-    "build": "rimraf resources mta_archives gen app/btplense/btplense.zip app/btplense/dist app/btplensev2/btplensev2.zip app/btplensev2/dist && mbt build --mtar archive",
+    "build": "rimraf resources mta_archives gen app/btplensev2/btplensev2.zip app/btplensev2/dist && mbt build --mtar archive",
     "deploy": "cf deploy mta_archives/archive.mtar --retries 1"
   },
   "private": true,

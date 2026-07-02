@@ -42,25 +42,11 @@ modules:
       build-result: resources
       requires:
         - artifacts:
-            - btplense.zip
-          name: BTPLense-btplense
-          target-path: resources/
-        - artifacts:
             - btplensev2.zip
           name: BTPLense-btplensev2
           target-path: resources/
 
-  # ── SAPUI5 frontend — original btplense ──────────────────────────────────────
-  - name: BTPLense-btplense
-    type: html5
-    path: app/btplense
-    build-parameters:
-      build-result: dist
-      builder: custom
-      commands:
-        - mkdir -p dist
-        - zip -r dist/btplense.zip . --exclude "dist/*" --exclude "*.zip" --exclude "*.map"
-      supported-platforms: []
+
 
   # ── SAPUI5 frontend — btplensev2 (new deployment) ────────────────────────────
   - name: BTPLense-btplensev2

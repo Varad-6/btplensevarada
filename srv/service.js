@@ -4,34 +4,49 @@ const fs = require("fs");
 const path = require("path");
 
 const accountsFile = path.join(__dirname, "accounts.json");
-const { GLOBAL_ACCOUNTS } = JSON.parse(fs.readFileSync(accountsFile, "utf8"));
+const { GLOBAL_ACCOUNTS, REGIONAL_TOKENS } = JSON.parse(fs.readFileSync(accountsFile, "utf8"));
 
 // Default region; overridden per-request by the cf config Target (local) or CF_API env (BTP)
 const DEFAULT_CF_API = "https://api.cf.eu30.hana.ondemand.com";
 
+// --- START OF MULTI-REGION MAPPING ---
+// Mapping of Subaccount GUIDs to their respective Region API and Auth endpoints
+const SUBACCOUNT_REGIONS = {
+  // ais-joule subaccount
+  "9476941f-88e3-474e-a4c6-28b1214965f2": {
+    api: "https://api.cf.eu10-005.hana.ondemand.com",
+    auth: "https://login.cf.eu10-005.hana.ondemand.com"
+  }
+};
+// --- END OF MULTI-REGION MAPPING ---
+
 module.exports = cds.service.impl(async function () {
 
+  // --- START OF WINDOWS & REGION COMPATIBILITY CHANGES ---
   function getCFApi() {
     // On BTP: set CF_API env var to the landscape API endpoint.
     if (process.env.CF_API) return process.env.CF_API;
     // On local: read the active target from cf config (set by cf login).
     try {
-      const cfConfigPath = path.join(process.env.HOME, ".cf/config.json");
+      // FIX: Use process.env.USERPROFILE as a fallback for Windows local environments
+      const cfConfigPath = path.join(process.env.HOME || process.env.USERPROFILE, ".cf/config.json");
       const cfConfig = JSON.parse(fs.readFileSync(cfConfigPath, "utf8"));
       if (cfConfig.Target) return cfConfig.Target.replace(/\/$/, "");
     } catch (e) {}
     return DEFAULT_CF_API;
   }
 
-  async function getCFToken() {
-    // On BTP: set CF_REFRESH_TOKEN env var via: cf set-env BTPLense-srv CF_REFRESH_TOKEN <token>
-    // On local: reads from ~/.cf/config.json (set by cf login)
-    if (process.env.CF_REFRESH_TOKEN) {
-      const authEndpoint = process.env.CF_AUTH_URL || "https://login.cf.eu30.hana.ondemand.com";
+  // UPDATED: Added apiEndpoint and authEndpoint parameters.
+  // Refreshes token in-memory without polluting config.json if configured in accounts.json.
+  async function getCFToken(apiEndpoint, authEndpoint) {
+    // 1. Check if token is explicitly configured in accounts.json for this region API
+    const configuredToken = REGIONAL_TOKENS && REGIONAL_TOKENS[apiEndpoint];
+    if (configuredToken) {
+      const authUrl = authEndpoint || "https://login.cf.eu30.hana.ondemand.com";
       const params = new URLSearchParams();
       params.append("grant_type", "refresh_token");
-      params.append("refresh_token", process.env.CF_REFRESH_TOKEN);
-      const res = await axios.post(`${authEndpoint}/oauth/token`, params, {
+      params.append("refresh_token", configuredToken);
+      const res = await axios.post(`${authUrl}/oauth/token`, params, {
         headers: {
           "Authorization": "Basic " + Buffer.from("cf:").toString("base64"),
           "Content-Type": "application/x-www-form-urlencoded"
@@ -40,23 +55,47 @@ module.exports = cds.service.impl(async function () {
       return `bearer ${res.data.access_token}`;
     }
 
-    // Local development fallback
-    const cfConfigPath = path.join(process.env.HOME, ".cf/config.json");
+    // 2. Check if running on BTP (production env)
+    if (process.env.CF_REFRESH_TOKEN) {
+      const authUrl = authEndpoint || process.env.CF_AUTH_URL || "https://login.cf.eu30.hana.ondemand.com";
+      const params = new URLSearchParams();
+      params.append("grant_type", "refresh_token");
+      params.append("refresh_token", process.env.CF_REFRESH_TOKEN);
+      const res = await axios.post(`${authUrl}/oauth/token`, params, {
+        headers: {
+          "Authorization": "Basic " + Buffer.from("cf:").toString("base64"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      });
+      return `bearer ${res.data.access_token}`;
+    }
+
+    // 3. Local development fallback (reads from config.json target)
+    const cfConfigPath = path.join(process.env.HOME || process.env.USERPROFILE, ".cf/config.json");
     const cfConfig = JSON.parse(fs.readFileSync(cfConfigPath, "utf8"));
     const params = new URLSearchParams();
     params.append("grant_type", "refresh_token");
     params.append("refresh_token", cfConfig.RefreshToken);
-    const res = await axios.post(`${cfConfig.AuthorizationEndpoint}/oauth/token`, params, {
+    
+    const targetAuthEndpoint = authEndpoint || cfConfig.AuthorizationEndpoint;
+    
+    const res = await axios.post(`${targetAuthEndpoint}/oauth/token`, params, {
       headers: {
         "Authorization": "Basic " + Buffer.from("cf:").toString("base64"),
         "Content-Type": "application/x-www-form-urlencoded"
       }
     });
-    cfConfig.AccessToken = `bearer ${res.data.access_token}`;
-    cfConfig.RefreshToken = res.data.refresh_token;
-    fs.writeFileSync(cfConfigPath, JSON.stringify(cfConfig));
+    
+    // Only write back to config.json if this is the active CLI target (to prevent token pollution)
+    if (!authEndpoint || authEndpoint === cfConfig.AuthorizationEndpoint) {
+      cfConfig.AccessToken = `bearer ${res.data.access_token}`;
+      cfConfig.RefreshToken = res.data.refresh_token;
+      fs.writeFileSync(cfConfigPath, JSON.stringify(cfConfig));
+    }
+    
     return `bearer ${res.data.access_token}`;
   }
+  // --- END OF WINDOWS & REGION COMPATIBILITY CHANGES ---
 
   async function getToken(account) {
     const params = new URLSearchParams();
@@ -76,21 +115,51 @@ module.exports = cds.service.impl(async function () {
     }
   }
 
-  async function resolveAppNames(guids) {
-    if (!guids.length) return {};
-    try {
-      const token = await getCFToken();
-      const CF_API = getCFApi();
-      const res = await axios.get(`${CF_API}/v3/apps?guids=${guids.join(",")}&per_page=200`, {
-        headers: { Authorization: token }
-      });
-      const map = {};
-      (res.data.resources || []).forEach(app => { map[app.guid] = app.name; });
-      return map;
-    } catch (e) {
-      return {};
-    }
+  // --- START OF MULTI-REGION APP NAME RESOLUTION ---
+  // UPDATED: Now accepts objects containing { guid, subaccountId } instead of simple list of GUIDs.
+  // Groups apps by their subaccount region and executes API calls to multiple region endpoints.
+  async function resolveAppNames(appMappings) {
+    if (!appMappings.length) return {};
+    
+    const regionGroups = {};
+    const CF_API_DEFAULT = getCFApi();
+    
+    // Group the application GUIDs by their respective API endpoints
+    appMappings.forEach(({ guid, subaccountId }) => {
+      const config = SUBACCOUNT_REGIONS[subaccountId] || {};
+      const apiEndpoint = config.api || CF_API_DEFAULT;
+      const authEndpoint = config.auth || null;
+      
+      if (!regionGroups[apiEndpoint]) {
+        regionGroups[apiEndpoint] = { auth: authEndpoint, guids: [] };
+      }
+      regionGroups[apiEndpoint].guids.push(guid);
+    });
+
+    const mergedMap = {};
+
+    // Run region resolution queries in parallel
+    await Promise.all(Object.entries(regionGroups).map(async ([apiEndpoint, group]) => {
+      try {
+        const uniqueGuids = [...new Set(group.guids)];
+        // Pass both apiEndpoint and authEndpoint to getCFToken
+        const token = await getCFToken(apiEndpoint, group.auth);
+        
+        const res = await axios.get(`${apiEndpoint}/v3/apps?guids=${uniqueGuids.join(",")}&per_page=200`, {
+          headers: { Authorization: token }
+        });
+        
+        (res.data.resources || []).forEach(app => {
+          mergedMap[app.guid] = app.name;
+        });
+      } catch (e) {
+        console.error(`Failed resolving names for region endpoint ${apiEndpoint}:`, e.message);
+      }
+    }));
+
+    return mergedMap;
   }
+  // --- END OF MULTI-REGION APP NAME RESOLUTION ---
 
   async function processAllAccounts(urlType, fromDate, toDate) {
     let finalResult = { data: [] };
@@ -111,13 +180,12 @@ module.exports = cds.service.impl(async function () {
     const { fromDate, toDate } = req.data;
     const result = await processAllAccounts("usageUrl", fromDate, toDate);
 
-    const cfGuids = [...new Set(
-      result.data
-        .filter(r => r.application && r.application.trim())
-        .map(r => r.application)
-    )];
+    // UPDATED: Now maps applications to their subaccount ID to resolve names across multiple regions
+    const appMappings = result.data
+      .filter(r => r.application && r.application.trim())
+      .map(r => ({ guid: r.application, subaccountId: r.subaccountId }));
 
-    const appNameMap = await resolveAppNames(cfGuids);
+    const appNameMap = await resolveAppNames(appMappings);
     result.data.forEach(row => {
       row.applicationName = (row.application && appNameMap[row.application]) || "";
     });
@@ -179,8 +247,12 @@ module.exports = cds.service.impl(async function () {
         subaccountTotalUsage[app.subaccountId] += appUsage;
       });
 
-      const allGuids = [...new Set(Object.values(appData).map(a => a.guid))];
-      const appNameMap = await resolveAppNames(allGuids);
+      // UPDATED: Maps applications to their subaccount ID to query the correct region endpoint in resolveAppNames
+      const appMappings = Object.values(appData).map(app => ({
+        guid: app.guid,
+        subaccountId: app.subaccountId
+      }));
+      const appNameMap = await resolveAppNames(appMappings);
 
       const data = Object.values(appData).map(app => {
         const appUsage = (app.runtimeUsage + app.persistentUsage) || app.memoryHours;

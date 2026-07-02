@@ -28,3 +28,7 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 *.swp
+
+# Installer and scratch list
+cf8_installer.exe
+subaccounts_list.txt
